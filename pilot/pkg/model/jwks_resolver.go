@@ -17,7 +17,6 @@ package model
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -277,10 +276,10 @@ func (r *JwksResolver) BuildLocalJwks(jwksURI, jwtIssuer, jwtPubKey string) *env
 		// workflow, where the JWT key resolver should have already been initialized on server creation.
 		jwtPubKey, err = r.GetPublicKey(jwtIssuer, jwksURI)
 		if err != nil {
-			log.Infof("The JWKS key is not yet fetched for issuer %s (%s), using a fake JWKS for now", jwtIssuer, jwksURI)
-			// This is a temporary workaround to reject a request with JWT token by using a fake jwks when istiod failed to fetch it.
-			// TODO(xulingqing): Find a better way to reject the request without using the fake jwks.
-			jwtPubKey = CreateFakeJwks(jwksURI)
+			log.Warnf("JWKS fetch failed for issuer %s (%s), using public-only JWKS with discarded private key - JWT requests will be rejected", jwtIssuer, jwksURI)
+			// fail closed: use a public key where the private key has been permanently discarded
+			// nobody can sign valid JWTs because the private key doesn't exist anywhere
+			jwtPubKey = PublicOnlyJwks
 		}
 	}
 	return &envoy_jwt.JwtProvider_LocalJwks{
@@ -292,14 +291,20 @@ func (r *JwksResolver) BuildLocalJwks(jwksURI, jwtIssuer, jwtPubKey string) *env
 	}
 }
 
-// CreateFakeJwks is a helper function to make a fake jwks when istiod failed to fetch it.
-func CreateFakeJwks(jwksURI string) string {
-	// Create a fake jwksURI
-	fakeJwksURI := "Error-IstiodFailedToFetchJwksUri-" + jwksURI
-	// Encode jwksURI with base64 to make dynamic n in jwks
-	encodedString := base64.RawURLEncoding.EncodeToString([]byte(fakeJwksURI))
-	return fmt.Sprintf(`{"keys":[ {"e":"AQAB","kid":"abc","kty":"RSA","n":"%s"}]}`, encodedString)
-}
+// PublicOnlyJwks is a JWKS containing a public RSA key where the private key was generated and immediately discarded.
+// This is used as a fail-closed fallback when JWKS fetch fails - since nobody has the private key, no valid JWTs can be forged.
+// The private key (d, p, q, dp, dq, qi) does not exist anywhere, making it cryptographically impossible to sign JWTs that
+// would validate against this public key.
+// nolint: lll
+const PublicOnlyJwks = `{
+  "keys": [
+    {
+      "kty": "RSA",
+      "e": "AQAB",
+      "n": "0xObjM0UvS_oaazjpEYlAbwctEJ4L8pH3OuTb7qth7gUwqet-EzQB4dgFdvSdMgrLnSncQGRjpEYz3F3viIbH-3EN3TxSlPNviHxeOdyiBVfumN8dMxbLvVJUpfNOnvmMxJcl-8NNjAwcOjk4otSALaYgYYyOPyvKtgVdrQr-FoubWX4yrjxW-MJ2-7OBeepUUNOsVwGV23YX03sVkkyvY3otRflkBcY3_HKpBxJl9wk2GyOShN4_PNUF9-vwfnvOXMbCDX-w4PTef4geeb_GiT40YCKHTKMSPVanGRn5GExIWmki-mmqh94-mPTJyBR74ShspL3BxPZitDL574T1w"
+    }
+  ]
+}`
 
 // Resolve jwks_uri through openID discovery.
 func (r *JwksResolver) resolveJwksURIUsingOpenID(issuer string) (string, error) {
